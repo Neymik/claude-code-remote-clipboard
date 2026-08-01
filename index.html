@@ -1,0 +1,978 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Paste screenshots with Ctrl+V into Claude Code running on a remote server.">
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  body, h1, h2, h3, h4, p, ul, ol, li, pre, figure, blockquote, table { margin: 0; padding: 0; }
+  img { max-width: 100%; }
+  button { font: inherit; }
+</style>
+<title>Ctrl+V for images in a remote Claude Code session</title>
+<style>
+  :root {
+    --paper:   #e9eef1;
+    --surface: #ffffff;
+    --sunken:  #f3f6f8;
+    --line:    #cbd6de;
+    --ink:     #14202a;
+    --muted:   #55697a;
+    --accent:  #0e6e8c;
+    --accent-soft: #d8eaf1;
+    --caution: #8f5510;
+    --caution-soft: #f6e8d5;
+    --good:    #1c6f55;
+
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --serif: ui-serif, Georgia, "Iowan Old Style", "Times New Roman", serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:   #0e161d;
+      --surface: #17222c;
+      --sunken:  #101a22;
+      --line:    #2b3b48;
+      --ink:     #e2eaf0;
+      --muted:   #90a4b4;
+      --accent:  #5cb8d6;
+      --accent-soft: #123542;
+      --caution: #d9a25a;
+      --caution-soft: #33260f;
+      --good:    #57c4a0;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:   #0e161d;
+    --surface: #17222c;
+    --sunken:  #101a22;
+    --line:    #2b3b48;
+    --ink:     #e2eaf0;
+    --muted:   #90a4b4;
+    --accent:  #5cb8d6;
+    --accent-soft: #123542;
+    --caution: #d9a25a;
+    --caution-soft: #33260f;
+    --good:    #57c4a0;
+  }
+  :root[data-theme="light"] {
+    --paper:   #e9eef1;
+    --surface: #ffffff;
+    --sunken:  #f3f6f8;
+    --line:    #cbd6de;
+    --ink:     #14202a;
+    --muted:   #55697a;
+    --accent:  #0e6e8c;
+    --accent-soft: #d8eaf1;
+    --caution: #8f5510;
+    --caution-soft: #f6e8d5;
+    --good:    #1c6f55;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 17px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 60rem;
+    margin: 0 auto;
+    padding: 3rem 1.25rem 6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2.75rem;
+  }
+
+  .prose { max-width: 40rem; }
+
+  /* ---------- masthead ---------- */
+  .masthead { display: flex; flex-direction: column; gap: 1rem; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: var(--serif);
+    font-size: clamp(2rem, 5vw, 3rem);
+    line-height: 1.1;
+    font-weight: 600;
+    text-wrap: balance;
+    letter-spacing: -0.015em;
+  }
+  .standfirst {
+    font-size: 1.15rem;
+    color: var(--muted);
+    max-width: 38rem;
+    text-wrap: pretty;
+  }
+
+  /* ---------- sections ---------- */
+  section { display: flex; flex-direction: column; gap: 1.1rem; }
+  h2 {
+    font-family: var(--serif);
+    font-size: 1.6rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid var(--line);
+  }
+  h3 {
+    font-family: var(--sans);
+    font-size: 1rem;
+    font-weight: 650;
+    letter-spacing: 0.005em;
+  }
+  p { text-wrap: pretty; }
+  a { color: var(--accent); text-underline-offset: 0.2em; }
+  strong { font-weight: 650; }
+  ul { display: flex; flex-direction: column; gap: 0.4rem; padding-left: 1.1rem; }
+  li::marker { color: var(--muted); }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.87em;
+    background: var(--sunken);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0.08em 0.32em;
+    word-break: break-word;
+  }
+
+  /* ---------- steps ---------- */
+  .step {
+    display: grid;
+    grid-template-columns: 2.75rem 1fr;
+    gap: 0 1rem;
+    align-items: start;
+  }
+  .step-num {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--accent);
+    padding-top: 0.15rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .step-body { display: flex; flex-direction: column; gap: 0.9rem; min-width: 0; }
+  .step-head { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: baseline; }
+  .step-head h3 { font-size: 1.15rem; }
+
+  .where {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    padding: 0.15rem 0.45rem;
+    border-radius: 3px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+    align-self: center;
+  }
+  .where.local  { color: var(--accent); background: var(--accent-soft); }
+  .where.remote { color: var(--caution); background: var(--caution-soft); }
+
+  @media (max-width: 34rem) {
+    .step { grid-template-columns: 1fr; gap: 0.5rem; }
+    .step-num { padding-top: 0; }
+  }
+
+  /* ---------- code blocks ---------- */
+  .code {
+    position: relative;
+    background: var(--sunken);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+  }
+  .code pre {
+    overflow-x: auto;
+    padding: 0.9rem 1rem;
+    font-family: var(--mono);
+    font-size: 0.815rem;
+    line-height: 1.6;
+    tab-size: 4;
+  }
+  .code pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: inherit;
+  }
+  .code-label {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0.45rem 1rem 0;
+    display: block;
+  }
+  .copy {
+    position: absolute;
+    top: 0.4rem;
+    right: 0.4rem;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0.2rem 0.45rem;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s ease, color 0.12s ease;
+  }
+  .code:hover .copy, .copy:focus-visible { opacity: 1; }
+  .copy:hover { color: var(--accent); border-color: var(--accent); }
+  .copy[data-done="1"] { color: var(--good); border-color: var(--good); opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { .copy { transition: none; } }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- callouts ---------- */
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--surface);
+    padding: 0.85rem 1.1rem;
+    border-radius: 0 5px 5px 0;
+    font-size: 0.95rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+  .note.warn { border-left-color: var(--caution); }
+  .note .tag {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .note.warn .tag { color: var(--caution); }
+
+  /* ---------- diagram + tables ---------- */
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1.25rem 1rem;
+    overflow-x: auto;
+  }
+  .flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.5rem; }
+  .node {
+    flex: 1 1 9rem;
+    background: var(--sunken);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.6rem 0.7rem;
+    font-size: 0.82rem;
+    line-height: 1.4;
+  }
+  .node-tag {
+    display: block;
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 0.3rem;
+  }
+  .node.local .node-tag { color: var(--accent); }
+  .node.remote .node-tag { color: var(--caution); }
+  .node code { font-size: 0.95em; background: none; border: none; padding: 0; }
+  .arrow {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+  .arrow.tunnel span:first-child {
+    font-family: var(--mono);
+    font-size: 0.58rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--caution);
+  }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 5px; }
+  table { border-collapse: collapse; width: 100%; background: var(--surface); font-size: 0.92rem; }
+  th, td { text-align: left; padding: 0.6rem 0.85rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: none; }
+  td code { white-space: nowrap; }
+
+  .ledger { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; }
+  .ledger-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1rem 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .ledger-card ul { padding-left: 1rem; font-size: 0.92rem; }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 1.25rem;
+    color: var(--muted);
+    font-size: 0.88rem;
+  }
+</style>
+</head>
+<body>
+
+
+<div class="page">
+
+  <header class="masthead">
+    <div class="eyebrow">Claude Code · remote sessions</div>
+    <h1>Ctrl+V for images in a remote Claude Code session</h1>
+    <p class="standfirst">Paste a screenshot straight into Claude Code running over SSH, instead of saving it,
+      <code>scp</code>-ing it across, and pasting the path.</p>
+  </header>
+
+  <section class="prose">
+    <h2>Why it doesn't work out of the box</h2>
+    <p>Claude Code reads a pasted image from the clipboard of the machine it runs on. On a headless
+      server there is no clipboard — your screenshot is sitting on your laptop, one network hop away.</p>
+    <p>But the way it reads that clipboard is easy to intercept. On Linux it shells out to exactly two
+      commands, and checks nothing but their exit codes — no <code>DISPLAY</code>, no X connection:</p>
+    <div class="code">
+      <span class="code-label">what Claude Code runs on Linux</span>
+      <pre><code>xclip -selection clipboard -t TARGETS   -o | grep -E "image/(png|jpeg|jpg|gif|webp|bmp)"
+xclip -selection clipboard -t image/png -o &gt; /tmp/&lt;tempfile&gt;</code></pre>
+    </div>
+    <p>So you don't need a real clipboard on the server. You need a program <em>named</em>
+      <code>xclip</code>, earlier in <code>PATH</code>, that answers those two calls with the image from
+      your laptop — fetched over a reverse tunnel you already have open for the SSH session.</p>
+  </section>
+
+  <section>
+    <h2>The shape of it</h2>
+    <div class="diagram">
+      <div class="flow">
+        <div class="node local"><span class="node-tag">your machine</span>Screenshot lands in the clipboard</div>
+        <div class="arrow" aria-hidden="true">&rarr;</div>
+        <div class="node local"><span class="node-tag">your machine</span>clip-image-server on <code>127.0.0.1:8377</code></div>
+        <div class="arrow tunnel"><span>reverse tunnel</span><span aria-hidden="true">&rarr;</span></div>
+        <div class="node remote"><span class="node-tag">the server</span>Tunnel port, one per session</div>
+        <div class="arrow" aria-hidden="true">&rarr;</div>
+        <div class="node remote"><span class="node-tag">the server</span><code>xclip</code> shim finds the live port</div>
+        <div class="arrow" aria-hidden="true">&rarr;</div>
+        <div class="node remote"><span class="node-tag">the server</span>Claude Code receives the image</div>
+      </div>
+    </div>
+    <p class="prose">Arrows show where the image data travels. The <em>request</em> goes the other way:
+      nothing leaves your machine until you actually press Ctrl+V on the server.</p>
+  </section>
+
+  <section>
+    <h2>What you need</h2>
+    <div class="ledger">
+      <div class="ledger-card">
+        <span class="where local">Your machine</span>
+        <ul>
+          <li>Python 3.7 or newer</li>
+          <li>macOS, Linux, or Windows</li>
+          <li><code>ssh</code>, or Eternal Terminal (<code>et</code>)</li>
+        </ul>
+      </div>
+      <div class="ledger-card">
+        <span class="where remote">The server</span>
+        <ul>
+          <li>Linux, with Claude Code installed</li>
+          <li><code>curl</code> or <code>wget</code></li>
+          <li>Write access to a directory in <code>PATH</code></li>
+          <li>Port <code>8377</code> free on loopback</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Setup</h2>
+
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <div class="step-head">
+          <h3>Install the clipboard server</h3>
+          <span class="where local">Your machine</span>
+        </div>
+        <p>Save this as <code>~/.local/bin/clip-image-server</code>. It listens on loopback only and
+          converts whatever is in your clipboard to PNG on demand.</p>
+        <div class="code">
+          <span class="code-label">~/.local/bin/clip-image-server</span>
+          <pre><code>#!/usr/bin/env python3
+"""Serve the local clipboard image over loopback for a remote Claude Code session."""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(os.environ.get("CLIP_IMAGE_PORT", "8377"))
+TOKEN_PATH = os.path.expanduser("~/.config/clip-image-server/token")
+PNG_MAGIC = b"\x89PNG"
+
+try:
+    with open(TOKEN_PATH) as fh:
+        TOKEN = fh.read().strip()
+except OSError:
+    TOKEN = ""
+
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=30)
+    except Exception:
+        return None
+
+
+def macos_png():
+    d = tempfile.mkdtemp(prefix="clip-image-server.")
+    path = os.path.join(d, "clip.png")
+    try:
+        r = run([
+            "osascript",
+            "-e", "set png_data to (the clipboard as «class PNGf»)",
+            "-e", 'set fp to open for access POSIX file "%s" with write permission' % path,
+            "-e", "write png_data to fp",
+            "-e", "close access fp",
+        ])
+        if r is None or r.returncode != 0:
+            return None
+        with open(path, "rb") as fh:
+            return fh.read() or None
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def linux_png():
+    for cmd in (["wl-paste", "--type", "image/png"],
+                ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]):
+        r = run(cmd)
+        if r and r.returncode == 0 and r.stdout.startswith(PNG_MAGIC):
+            return r.stdout
+    return None
+
+
+def windows_png():
+    d = tempfile.mkdtemp(prefix="clip-image-server.")
+    path = os.path.join(d, "clip.png")
+    try:
+        r = run(["powershell", "-NoProfile", "-NonInteractive", "-Sta", "-Command",
+                 "Add-Type -AssemblyName System.Windows.Forms;"
+                 "$img = [System.Windows.Forms.Clipboard]::GetImage();"
+                 "if ($null -eq $img) { exit 1 };"
+                 "$img.Save('%s', [System.Drawing.Imaging.ImageFormat]::Png)" % path])
+        if r is None or r.returncode != 0:
+            return None
+        with open(path, "rb") as fh:
+            return fh.read() or None
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+if sys.platform == "darwin":
+    read_png = macos_png
+elif sys.platform.startswith("win"):
+    read_png = windows_png
+else:
+    read_png = linux_png
+
+_cache_key = None
+_cache_png = None
+
+
+def clipboard_stamp():
+    """Cheap change detector. macOS only; elsewhere caching is simply skipped."""
+    if sys.platform != "darwin":
+        return None
+    r = run(["osascript", "-e", "clipboard info"])
+    return r.stdout if r and r.returncode == 0 else None
+
+
+def clipboard_png():
+    global _cache_key, _cache_png
+    key = clipboard_stamp()
+    if key is not None and key == _cache_key:
+        return _cache_png
+    png = read_png()
+    _cache_key, _cache_png = key, png
+    return png
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *a):
+        pass
+
+    def _respond(self, code, body=b"", ctype="text/plain"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_GET(self):
+        if TOKEN and self.headers.get("X-Clip-Token", "") != TOKEN:
+            return self._respond(403)
+        route = self.path.split("?")[0]
+        if route == "/id":
+            # lets the shim recognise us while it scans ports for a live tunnel
+            return self._respond(200, b"clip-image-server\n")
+        if route not in ("/check", "/png"):
+            return self._respond(404)
+        png = clipboard_png()
+        if not png:
+            return self._respond(404, b"no image on clipboard\n")
+        if route == "/check":
+            return self._respond(200, b"image/png\n")
+        return self._respond(200, png, "image/png")
+
+
+def main():
+    if not TOKEN:
+        print("warning: no token at %s, serving unauthenticated" % TOKEN_PATH, file=sys.stderr)
+    print("clip-image-server listening on 127.0.0.1:%d" % PORT, file=sys.stderr)
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+        </div>
+        <div class="note warn">
+          <span class="tag">Verified where</span>
+          <p>The macOS branch is tested end to end. The Linux and Windows clipboard branches follow the
+            same pattern but have not been run — check them before relying on them.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <div class="step-head">
+          <h3>Generate a shared token</h3>
+          <span class="where local">Your machine</span>
+        </div>
+        <p>Anything that can reach the tunnel endpoint on the server can ask for your clipboard. The
+          token keeps that to whoever you hand it to.</p>
+        <div class="code">
+          <pre><code>chmod +x ~/.local/bin/clip-image-server
+mkdir -p ~/.config/clip-image-server
+python3 -c "import secrets; print(secrets.token_urlsafe(24))" &gt; ~/.config/clip-image-server/token
+chmod 600 ~/.config/clip-image-server/token
+cat ~/.config/clip-image-server/token   # copy this, you need it in step 3</code></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <div class="step-head">
+          <h3>Install the xclip shim</h3>
+          <span class="where remote">The server</span>
+        </div>
+        <p>Save this as <code>/usr/local/bin/xclip</code> — or anywhere in <code>PATH</code> that comes
+          before a real <code>xclip</code>. Paste your token into the <code>TOKEN</code> line.</p>
+        <div class="code">
+          <span class="code-label">/usr/local/bin/xclip</span>
+          <pre><code>#!/bin/sh
+# xclip shim -- serves the client machine's clipboard to a remote Claude Code session.
+#
+# Claude Code fetches a pasted image with exactly two calls:
+#   xclip -selection clipboard -t TARGETS   -o
+#   xclip -selection clipboard -t image/png -o
+# Both are answered over a reverse tunnel back to the client.
+#
+# Each session tunnels on its own port, so the live one is found by scanning the
+# range below and asking each candidate to identify itself. Set CLIP_IMAGE_PORT to
+# skip the scan. Anything else is handed to the real xclip, if one is installed.
+
+TOKEN='PASTE_YOUR_TOKEN_HERE'
+PORT_MIN=8377
+PORT_MAX=8420
+MAGIC='clip-image-server'
+
+if command -v curl &gt;/dev/null 2&gt;&amp;1; then
+	HTTP=curl
+elif command -v wget &gt;/dev/null 2&gt;&amp;1; then
+	HTTP=wget
+else
+	HTTP=''
+fi
+
+# get &lt;port&gt; &lt;path&gt; &lt;timeout&gt; -- body on stdout, non-zero unless the request succeeds
+get() {
+	case "$HTTP" in
+		curl) curl -fs --connect-timeout 1 --max-time "$3" \
+		           -H "X-Clip-Token: $TOKEN" "http://127.0.0.1:$1$2" ;;
+		wget) wget -q -O - --connect-timeout=1 --timeout="$3" \
+		           --header="X-Clip-Token: $TOKEN" "http://127.0.0.1:$1$2" ;;
+		*)    return 1 ;;
+	esac
+}
+
+discover() {
+	if [ -n "$CLIP_IMAGE_PORT" ]; then
+		printf '%s\n' "$CLIP_IMAGE_PORT"
+		return 0
+	fi
+	p=$PORT_MIN
+	while [ "$p" -le "$PORT_MAX" ]; do
+		if [ "$(get "$p" /id 3 2&gt;/dev/null)" = "$MAGIC" ]; then
+			printf '%s\n' "$p"
+			return 0
+		fi
+		p=$((p + 1))
+	done
+	return 1
+}
+
+self=$(cd "$(dirname "$0")" 2&gt;/dev/null &amp;&amp; pwd)/$(basename "$0")
+real=''
+oldifs=$IFS
+IFS=:
+for dir in $PATH; do
+	cand="$dir/xclip"
+	[ -x "$cand" ] || continue
+	[ "$cand" = "$self" ] &amp;&amp; continue
+	real="$cand"
+	break
+done
+IFS=$oldifs
+
+passthrough() {
+	[ -n "$real" ] &amp;&amp; exec "$real" "$@"
+	exit 1
+}
+
+case " $* " in
+	*" -t TARGETS "*)
+		port=$(discover) &amp;&amp; get "$port" /check 5 &amp;&amp; exit 0
+		passthrough "$@"
+		;;
+	*" -t image/png "*)
+		port=$(discover) &amp;&amp; get "$port" /png 30 &amp;&amp; exit 0
+		passthrough "$@"
+		;;
+esac
+
+passthrough "$@"
+</code></pre>
+        </div>
+        <p>Then lock it down — the token lives inside the file, so only the user running Claude Code
+          should be able to read it:</p>
+        <div class="code">
+          <pre><code>chmod 700 /usr/local/bin/xclip
+command -v xclip          # must print your shim's path</code></pre>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <div class="step-head">
+          <h3>Connect with a reverse tunnel</h3>
+          <span class="where local">Your machine</span>
+        </div>
+        <p>Start the clipboard server, then connect. The tunnel flag is the part people forget — without
+          it the shim just reports "no image".</p>
+        <div class="code">
+          <pre><code>python3 ~/.local/bin/clip-image-server &amp;
+
+# Eternal Terminal -- source:destination is server port -&gt; client port.
+# Every session needs its own SERVER port; the client port stays fixed.
+et -r 8377:8377 user@host     # first session
+et -r 8378:8377 user@host     # a second, concurrent session
+
+# or plain SSH
+ssh -R 8377:127.0.0.1:8377 user@host</code></pre>
+        </div>
+        <div class="note warn">
+          <span class="tag">Two sessions cannot share a port</span>
+          <p>A reverse-tunnel port is bound by the <code>etserver</code> <em>daemon</em>, not by your
+            session. Point a second session at a port another one already holds and ET kills it
+            outright — you get <code>Session terminated</code> and no shell at all. Increment the
+            server-side port per session, or let the function below choose one for you.</p>
+          <p><code>Session terminated</code> printed <em>after</em> <code>logout</code> is just a normal
+            goodbye. The failure looks like the same words appearing <em>instead of</em> a prompt.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <div class="step-head">
+          <h3>Paste</h3>
+          <span class="where remote">The server</span>
+        </div>
+        <p>Take a screenshot to the clipboard, then press <strong>Ctrl+V</strong> in Claude Code on the
+          server. Not Cmd+V — on macOS that is the terminal's own paste, which only carries text. Ctrl+V
+          passes through as a raw <code>^V</code>, which is what Claude Code listens for.</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Client OS</th><th>Screenshot to clipboard</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>macOS</td><td><code>Cmd + Ctrl + Shift + 4</code></td></tr>
+              <tr><td>Windows</td><td><code>Win + Shift + S</code></td></tr>
+              <tr><td>Linux</td><td><code>Shift + PrtSc</code> (varies by desktop)</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Check that it works</h2>
+    <p class="prose">Put an image on your clipboard, then run this <em>on the server</em>, inside the
+      tunnelled session:</p>
+    <div class="code">
+      <pre><code>xclip -selection clipboard -t TARGETS -o</code></pre>
+    </div>
+    <p class="prose"><code>image/png</code> means the whole chain is live. Silence means it isn't — and
+      the shim fails in about 12 ms rather than hanging, so a dead tunnel only ever costs you a
+      "no image found", never a frozen session.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Session ends instantly with <code>Session terminated</code>, no prompt</td>
+            <td>Another session already holds that reverse-tunnel port</td>
+            <td>Give each session its own server-side port</td>
+          </tr>
+          <tr>
+            <td>Prints nothing, even with an image copied</td>
+            <td>No reverse tunnel on this connection</td>
+            <td>Reconnect with <code>-r</code> / <code>-R</code></td>
+          </tr>
+          <tr>
+            <td>A real <code>xclip</code> runs instead of the shim</td>
+            <td>Shim is later in <code>PATH</code></td>
+            <td>Check <code>command -v xclip</code>; move the shim earlier</td>
+          </tr>
+          <tr>
+            <td>Works over <code>ssh</code>, not in your editor's terminal</td>
+            <td>That terminal opened its own connection, without the tunnel</td>
+            <td>Add the flag there too</td>
+          </tr>
+          <tr>
+            <td>403 in the server's response</td>
+            <td>Token mismatch between the two files</td>
+            <td>Re-copy the token into the shim</td>
+          </tr>
+          <tr>
+            <td>Ctrl+V does nothing in Claude Code</td>
+            <td>Your terminal is intercepting the key</td>
+            <td>Unbind Ctrl+V in the terminal's keymap</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Optional: one command instead of three</h2>
+    <p class="prose">This zsh function starts the bridge only when it's needed, and stops it when the
+      connection ends — unless another session is still using it. Add it to <code>~/.zshrc</code>.</p>
+    <div class="code">
+      <span class="code-label">~/.zshrc</span>
+      <pre><code>clip_et() {
+    local host="${1:?usage: clip_et &lt;host&gt; [et args...]}"
+    shift
+    local local_port="${CLIP_IMAGE_PORT:-8377}"
+    local pid= remote_port= used=
+
+    # One bridge per machine, shared by every session
+    if ! nc -z 127.0.0.1 "$local_port" 2&gt;/dev/null; then
+        python3 "$HOME/.local/bin/clip-image-server" &gt;&gt;"$HOME/clip-image-server.log" 2&gt;&amp;1 &amp;
+        pid=$!
+        local i
+        for i in {1..50}; do
+            nc -z 127.0.0.1 "$local_port" 2&gt;/dev/null &amp;&amp; break
+            sleep 0.1
+        done
+    fi
+
+    # etserver binds a reverse-tunnel port globally, not per session, so two
+    # sessions sharing one port kill each other. Claim a port nobody holds.
+    used=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$host" \
+               "ss -ltnH 2&gt;/dev/null | awk '{print \$4}' | sed 's/.*://'" 2&gt;/dev/null)
+    if [[ -n $used ]]; then
+        local p
+        for p in {8377..8420}; do
+            print -r -- "$used" | grep -qx "$p" || { remote_port=$p; break }
+        done
+    fi
+
+    # Losing the bridge must never cost you the session
+    if [[ -n $remote_port ]]; then
+        et -r "$remote_port:$local_port" "$@" "$host"
+    else
+        print -u2 "clip_et: no remote port available - connecting without the clipboard bridge"
+        et "$@" "$host"
+    fi
+    local rc=$?
+
+    # Stop the bridge only if we started it and nothing else is still tunnelling
+    if [[ -n $pid ]] &amp;&amp; ! pgrep -f 'et -r [0-9]' &gt;/dev/null 2&gt;&amp;1; then
+        kill "$pid" 2&gt;/dev/null
+    fi
+    return $rc
+}
+
+alias myserver="clip_et user@host"
+</code></pre>
+    </div>
+    <p class="prose">Deliberately not a launch agent or systemd unit: the bridge exists only alongside a
+      connection, so nothing is listening on your machine while you're not connected.</p>
+  </section>
+
+  <section>
+    <h2>Warp, Eternal Terminal and Claude Code</h2>
+    <p class="prose">Things that bite in this particular combination, all of them met while getting the
+      bridge working.</p>
+
+    <div class="ledger">
+      <div class="ledger-card">
+        <h3>Pin your locale</h3>
+        <p>Warp exports an <code>LC_CTYPE</code> value Linux does not recognise, and both SSH and ET
+          forward it. You get <code>setlocale</code> warnings and mangled box drawing in Claude Code's
+          interface. Put this in your shell rc on the client:</p>
+        <div class="code">
+          <pre><code>export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8</code></pre>
+        </div>
+      </div>
+
+      <div class="ledger-card">
+        <h3>Run Claude Code inside tmux</h3>
+        <p>ET survives dropped networks and a closed laptop lid, so the session keeps going. What it does
+          not survive is you restarting <code>et</code> — and you will, whenever you want a fresh tunnel.
+          Start Claude Code inside <code>tmux</code> on the server and reconnecting costs you nothing.</p>
+      </div>
+
+      <div class="ledger-card">
+        <h3>Sweep up old ET sessions</h3>
+        <p><code>etserver</code> keeps sessions alive so you can resume them, which means abandoned ones
+          pile up as <code>etterminal</code> processes — a working server had seven. Connect with
+          <code>et -x</code> to kill your own leftovers first.</p>
+      </div>
+
+      <div class="ledger-card">
+        <h3>Claude Code hides from scripts</h3>
+        <p><code>ssh host 'claude --version'</code> can fail while the same command works once you are
+          logged in. <code>~/.local/bin</code> is added by <code>~/.profile</code>, which non-interactive
+          shells never read. Use the full path when scripting.</p>
+      </div>
+
+      <div class="ledger-card">
+        <h3>Warp's shell integration leaks into pipes</h3>
+        <p>Capture an ET session's output to a file and you will find a <code>SourcedRcFileForWarp</code>
+          JSON line mixed in with terminal escapes. Harmless, but pipe through <code>strings</code> when
+          you are trying to read what actually happened.</p>
+      </div>
+
+      <div class="ledger-card">
+        <h3>Ctrl+V is not Cmd+V</h3>
+        <p>Warp binds paste to Cmd+V, which sends clipboard <em>text</em> and never reaches Claude Code's
+          image handler. Ctrl+V is unbound and passes through as a raw <code>^V</code>. That is the key
+          this whole setup depends on.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Before you trust it</h2>
+    <div class="note warn">
+      <span class="tag">Who can read your clipboard</span>
+      <p>While the tunnel is up, anyone with shell access on that server can pull whatever image is on
+        your clipboard. That is fine for a machine you own and bad for a shared one. The token limits
+        casual access, not a determined user who can read the shim.</p>
+    </div>
+    <div class="note">
+      <span class="tag">If a future release changes this</span>
+      <p>The two commands were read out of the Claude Code binary, version 2.1.220. If pasting stops
+        working after an upgrade, confirm the mechanism is still the same before debugging anything else:</p>
+      <div class="code">
+        <pre><code>strings -a ~/.local/share/claude/versions/&lt;version&gt; \
+  | grep -F 'xclip -selection clipboard -t TARGETS'</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Tested with Claude Code 2.1.220 on both ends: macOS client, Ubuntu 24.04 server, over Eternal
+      Terminal and OpenSSH. A PNG round-tripped byte-identical across both transports.</p>
+    <p>Scripts and source: <a href="https://github.com/Neymik/claude-code-remote-clipboard">github.com/Neymik/claude-code-remote-clipboard</a></p>
+  </footer>
+
+</div>
+
+<script>
+  document.querySelectorAll(".code").forEach(function (block) {
+    var pre = block.querySelector("pre");
+    if (!pre || pre.classList.contains("mermaid")) return;
+    var btn = document.createElement("button");
+    btn.className = "copy";
+    btn.type = "button";
+    btn.textContent = "copy";
+    btn.addEventListener("click", function () {
+      navigator.clipboard.writeText(pre.innerText).then(function () {
+        btn.textContent = "copied";
+        btn.dataset.done = "1";
+        setTimeout(function () {
+          btn.textContent = "copy";
+          delete btn.dataset.done;
+        }, 1600);
+      });
+    });
+    block.appendChild(btn);
+  });
+</script>
+
+</body>
+</html>

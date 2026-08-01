@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Serve the local clipboard image over loopback for a remote Claude Code session."""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(os.environ.get("CLIP_IMAGE_PORT", "8377"))
+TOKEN_PATH = os.path.expanduser("~/.config/clip-image-server/token")
+PNG_MAGIC = b"\x89PNG"
+
+try:
+    with open(TOKEN_PATH) as fh:
+        TOKEN = fh.read().strip()
+except OSError:
+    TOKEN = ""
+
+
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=30)
+    except Exception:
+        return None
+
+
+def macos_png():
+    d = tempfile.mkdtemp(prefix="clip-image-server.")
+    path = os.path.join(d, "clip.png")
+    try:
+        r = run([
+            "osascript",
+            "-e", "set png_data to (the clipboard as «class PNGf»)",
+            "-e", 'set fp to open for access POSIX file "%s" with write permission' % path,
+            "-e", "write png_data to fp",
+            "-e", "close access fp",
+        ])
+        if r is None or r.returncode != 0:
+            return None
+        with open(path, "rb") as fh:
+            return fh.read() or None
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def linux_png():
+    for cmd in (["wl-paste", "--type", "image/png"],
+                ["xclip", "-selection", "clipboard", "-t", "image/png", "-o"]):
+        r = run(cmd)
+        if r and r.returncode == 0 and r.stdout.startswith(PNG_MAGIC):
+            return r.stdout
+    return None
+
+
+def windows_png():
+    d = tempfile.mkdtemp(prefix="clip-image-server.")
+    path = os.path.join(d, "clip.png")
+    try:
+        r = run(["powershell", "-NoProfile", "-NonInteractive", "-Sta", "-Command",
+                 "Add-Type -AssemblyName System.Windows.Forms;"
+                 "$img = [System.Windows.Forms.Clipboard]::GetImage();"
+                 "if ($null -eq $img) { exit 1 };"
+                 "$img.Save('%s', [System.Drawing.Imaging.ImageFormat]::Png)" % path])
+        if r is None or r.returncode != 0:
+            return None
+        with open(path, "rb") as fh:
+            return fh.read() or None
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+if sys.platform == "darwin":
+    read_png = macos_png
+elif sys.platform.startswith("win"):
+    read_png = windows_png
+else:
+    read_png = linux_png
+
+_cache_key = None
+_cache_png = None
+
+
+def clipboard_stamp():
+    """Cheap change detector. macOS only; elsewhere caching is simply skipped."""
+    if sys.platform != "darwin":
+        return None
+    r = run(["osascript", "-e", "clipboard info"])
+    return r.stdout if r and r.returncode == 0 else None
+
+
+def clipboard_png():
+    global _cache_key, _cache_png
+    key = clipboard_stamp()
+    if key is not None and key == _cache_key:
+        return _cache_png
+    png = read_png()
+    _cache_key, _cache_png = key, png
+    return png
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *a):
+        pass
+
+    def _respond(self, code, body=b"", ctype="text/plain"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def do_GET(self):
+        if TOKEN and self.headers.get("X-Clip-Token", "") != TOKEN:
+            return self._respond(403)
+        route = self.path.split("?")[0]
+        if route == "/id":
+            # lets the shim recognise us while it scans ports for a live tunnel
+            return self._respond(200, b"clip-image-server\n")
+        if route not in ("/check", "/png"):
+            return self._respond(404)
+        png = clipboard_png()
+        if not png:
+            return self._respond(404, b"no image on clipboard\n")
+        if route == "/check":
+            return self._respond(200, b"image/png\n")
+        return self._respond(200, png, "image/png")
+
+
+def main():
+    if not TOKEN:
+        print("warning: no token at %s, serving unauthenticated" % TOKEN_PATH, file=sys.stderr)
+    print("clip-image-server listening on 127.0.0.1:%d" % PORT, file=sys.stderr)
+    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,82 @@
+#!/bin/sh
+# xclip shim -- serves the client machine's clipboard to a remote Claude Code session.
+#
+# Claude Code fetches a pasted image with exactly two calls:
+#   xclip -selection clipboard -t TARGETS   -o
+#   xclip -selection clipboard -t image/png -o
+# Both are answered over a reverse tunnel back to the client.
+#
+# Each session tunnels on its own port, so the live one is found by scanning the
+# range below and asking each candidate to identify itself. Set CLIP_IMAGE_PORT to
+# skip the scan. Anything else is handed to the real xclip, if one is installed.
+
+TOKEN='PASTE_YOUR_TOKEN_HERE'
+PORT_MIN=8377
+PORT_MAX=8420
+MAGIC='clip-image-server'
+
+if command -v curl >/dev/null 2>&1; then
+	HTTP=curl
+elif command -v wget >/dev/null 2>&1; then
+	HTTP=wget
+else
+	HTTP=''
+fi
+
+# get <port> <path> <timeout> -- body on stdout, non-zero unless the request succeeds
+get() {
+	case "$HTTP" in
+		curl) curl -fs --connect-timeout 1 --max-time "$3" \
+		           -H "X-Clip-Token: $TOKEN" "http://127.0.0.1:$1$2" ;;
+		wget) wget -q -O - --connect-timeout=1 --timeout="$3" \
+		           --header="X-Clip-Token: $TOKEN" "http://127.0.0.1:$1$2" ;;
+		*)    return 1 ;;
+	esac
+}
+
+discover() {
+	if [ -n "$CLIP_IMAGE_PORT" ]; then
+		printf '%s\n' "$CLIP_IMAGE_PORT"
+		return 0
+	fi
+	p=$PORT_MIN
+	while [ "$p" -le "$PORT_MAX" ]; do
+		if [ "$(get "$p" /id 3 2>/dev/null)" = "$MAGIC" ]; then
+			printf '%s\n' "$p"
+			return 0
+		fi
+		p=$((p + 1))
+	done
+	return 1
+}
+
+self=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
+real=''
+oldifs=$IFS
+IFS=:
+for dir in $PATH; do
+	cand="$dir/xclip"
+	[ -x "$cand" ] || continue
+	[ "$cand" = "$self" ] && continue
+	real="$cand"
+	break
+done
+IFS=$oldifs
+
+passthrough() {
+	[ -n "$real" ] && exec "$real" "$@"
+	exit 1
+}
+
+case " $* " in
+	*" -t TARGETS "*)
+		port=$(discover) && get "$port" /check 5 && exit 0
+		passthrough "$@"
+		;;
+	*" -t image/png "*)
+		port=$(discover) && get "$port" /png 30 && exit 0
+		passthrough "$@"
+		;;
+esac
+
+passthrough "$@"
