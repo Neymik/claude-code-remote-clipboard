@@ -793,12 +793,25 @@ et user@host</code></pre>
               <code>et -r</code></td>
           </tr>
           <tr>
-            <td>The terminal takes tens of seconds to open</td>
-            <td>The port walk is opening a fresh SSH connection per taken port, and every port
-              below the first free one is held by a live session — at 250&nbsp;ms round trip that is
-              about three seconds each</td>
-            <td>Probe with <code>ssh -O forward</code> over one <code>ControlMaster</code>, as
-              below; a taken port then costs a round trip instead of a login</td>
+            <td>The terminal takes tens of seconds — or minutes — to open</td>
+            <td>Session startup is waiting on the tunnel. Every port below the first free one is
+              held by a live session, so the walk runs on every connect, and anything slow in it
+              lands directly in front of your prompt</td>
+            <td>Claim the port in a background job and hand off to <code>et</code> at once, as
+              below. The tunnel is a convenience; it should never gate the terminal</td>
+          </tr>
+          <tr>
+            <td>In Warp: startup hangs, or sessions drop when another one ends</td>
+            <td>Warp rewrites <code>ssh</code> invocations to reuse its own connection
+              (<code>warpify.ssh.reuse_existing_control_master</code>), prepending
+              <code>-o ControlMaster=yes -o ControlPath=~/.ssh/&lt;hash&gt; -t</code>. ssh keeps the
+              <em>first</em> value of an option, so Warp's control path wins and yours is never
+              created — probes then address a socket you do not own, and
+              <code>-O exit</code> closes <em>Warp's</em> master, taking its other sessions</td>
+            <td>Call the ssh binary by absolute path (<code>/usr/bin/ssh</code>), which no alias,
+              function or <code>PATH</code> shim can intercept, and never
+              <code>-O exit</code> a control path unless <code>[[ -S $ctl ]]</code> confirms it is
+              yours</td>
           </tr>
           <tr>
             <td><code>refusing to paste rather than risk another machine's clipboard</code></td>
@@ -855,68 +868,128 @@ et user@host</code></pre>
     local port_min="${CLIP_PORT_MIN:-8377}" port_max="${CLIP_PORT_MAX:-8420}"
     local pid= remote_port= ctl=
 
+    # CLIP_ET_DEBUG=1 svo  -&gt;  where the time actually goes. Off by default.
+    zmodload zsh/datetime 2&gt;/dev/null
+    local _t0=${EPOCHREALTIME:-0}
+    _clip_lap() {
+        [[ -n $CLIP_ET_DEBUG ]] || return 0
+        printf 'clip_et: %-22s %6.2fs\n' "$1" $(( ${EPOCHREALTIME:-0} - _t0 )) &gt;&amp;2
+    }
+
     # One bridge per machine, shared by every session
     if ! nc -z 127.0.0.1 "$local_port" 2&gt;/dev/null; then
-        python3 "$HOME/.local/bin/clip-image-server" &gt;&gt;"$HOME/clip-image-server.log" 2&gt;&amp;1 &amp;
+        python3 "$HOME/.local/bin/clip-image-server" \
+            &gt;&gt;"$HOME/clip-image-server.log" 2&gt;&amp;1 &amp;
         pid=$!
         local i
         for i in {1..50}; do
             nc -z 127.0.0.1 "$local_port" 2&gt;/dev/null &amp;&amp; break
             sleep 0.1
         done
+        nc -z 127.0.0.1 "$local_port" 2&gt;/dev/null ||
+            print -u2 "clip_et: clipboard bridge failed to start on :$local_port (see ~/clip-image-server.log)"
     fi
+    _clip_lap "bridge ready"
 
-    # Claim a port by BINDING it, never by asking whether it is free. Asking and
-    # using the answer later is a race the whole handshake fits through: the
-    # answer comes from server state every client is racing to change, so
-    # several machines asking at once are all told the same port is free -- and
-    # etserver's second listen() is a hard abort() that kills EVERY session on
-    # the host, not just the loser. So the bind IS the test.
+    # etserver binds a reverse-tunnel port globally, not per session, so two
+    # sessions sharing one port kill each other. Claim a port by BINDING it,
+    # never by asking whether it is free: asking and using the answer later is a
+    # TOCTOU wide enough to drive the whole handshake through. The answer comes
+    # from server state every client is racing to change, so several machines
+    # asking at once are all told the same port is free — and etserver's second
+    # listen() is a hard abort() (TcpSocketHandler.cpp:156) that kills EVERY
+    # session on the host, not just the loser. So the bind IS the test.
     #
-    # Probe over ONE multiplexed connection instead of logging in per port. sshd
-    # still performs the listen() and reports the failure, so the guarantee is
-    # unchanged, but a taken port costs a round trip rather than a full handshake.
-    # Every port below the first free one is held by a live session, so this walk
-    # happens on every connect -- logging in per port put &gt;20s in front of the
-    # terminal on a high-latency link.
+    # Probe over ONE multiplexed connection rather than logging in per port:
+    # sshd still performs the listen() and reports the failure, so the guarantee
+    # is unchanged, but a taken port costs a round trip (~0.3s) instead of a full
+    # handshake (~3s). That is not a micro-optimisation — every port below the
+    # first free one is held by a live session, so the walk happens on every
+    # connect, and at this RTT the login-per-port version took &gt;20s to open a
+    # terminal.
+    #
+    # Call the ssh BINARY, never the bare word. Warp rewrites ssh invocations to
+    # reuse its own connection (warpify.ssh.reuse_existing_control_master) and
+    # PREPENDS -o ControlMaster=yes -o ControlPath=~/.ssh/&lt;hash&gt; -t. ssh keeps the
+    # FIRST value of an option, so its path wins and ours is never created: the
+    # probes then address a socket we do not own (hangs for minutes) and -O exit
+    # would tear down WARP's master, dropping every other session on it. An
+    # absolute path dodges the rewrite whether it is an alias, a function or a
+    # PATH shim, since all three only match the bare word.
+    local SSH=/usr/bin/ssh
+    [[ -x $SSH ]] || SSH=$(whence -p ssh) || SSH=ssh
+
+    # The clipboard is a convenience; it must NEVER gate the terminal. Claim the
+    # port in the background and hand off to et immediately, so opening a session
+    # costs et's own connect and nothing else — however slow, rewritten or
+    # contended the tunnel setup turns out to be. The tunnel attaches a moment
+    # into the session; a paste in the first seconds may need one retry, and the
+    # shim already refuses rather than guesses when no tunnel is attributable.
     ctl="${TMPDIR:-/tmp}/clip-et-$$-${RANDOM}.ctl"
-    if ssh -o ControlMaster=yes -o ControlPath="$ctl" \
-           -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
-           -o ConnectTimeout=10 -o BatchMode=yes \
-           -fN "$host" 2&gt;/dev/null
-    then
-        local p
-        for p in {${port_min}..${port_max}}; do
-            if ssh -O forward -R "${p}:127.0.0.1:${local_port}" \
-                   -o ControlPath="$ctl" "$host" 2&gt;/dev/null
-            then
-                remote_port=$p
-                break
-            fi
-        done
-        # An idle master with no forward is just a leak
-        [[ -n $remote_port ]] || ssh -O exit -o ControlPath="$ctl" "$host" 2&gt;/dev/null
-    fi
-    if [[ -z $remote_port ]]; then
-        ctl=
-        print -u2 "clip_et: no free port in ${port_min}-${port_max} on $host - connecting without the clipboard bridge"
-    fi
+    local claimer=
+    {
+        if $SSH -o ControlMaster=yes -o ControlPath="$ctl" \
+                -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+                -o ConnectTimeout=10 -o BatchMode=yes \
+                -fN "$host" 2&gt;/dev/null &amp;&amp; [[ -S $ctl ]]
+        then
+            _clip_lap "master up"
+            local p
+            for p in {${port_min}..${port_max}}; do
+                if $SSH -O forward -R "${p}:127.0.0.1:${local_port}" \
+                        -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+                then
+                    remote_port=$p
+                    break
+                fi
+            done
+            _clip_lap "port ${remote_port:-none} claimed"
+            # An idle master with no forward is just a leak
+            [[ -n $remote_port ]] || $SSH -O exit -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+        fi
+    } &amp;!
+    claimer=$!   # &amp;! disowns, so zsh never prints a job-control line over the session
 
     # Deliberately no -r: etserver never listen()s on our behalf, so the abort
     # above is unreachable rather than merely less likely.
+    _clip_lap "handing off to et"
     et "$@" "$host"
     local rc=$?
 
-    # The tunnel dies with the session
+    # Stop a claim still in flight, so a slow or wedged one cannot outlive the
+    # session it was for. Killing the subshell does not reap an ssh -fN that has
+    # already detached, so give its socket a moment to appear — otherwise a master
+    # born just after teardown holds its port for good, and leaked ports are what
+    # made this slow in the first place. This runs after et has exited, so the
+    # wait is invisible.
+    if [[ -n $claimer ]]; then
+        kill "$claimer" 2&gt;/dev/null
+        local w
+        for w in {1..8}; do
+            [[ -S $ctl ]] &amp;&amp; break
+            sleep 0.2
+        done
+    fi
+
+    # The tunnel still dies with the session. Guarded on the socket being ours:
+    # -O exit against a control path we did not create would close someone else's
+    # master and take their sessions with it.
     if [[ -n $ctl ]]; then
-        ssh -O exit -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+        [[ -S $ctl ]] &amp;&amp; $SSH -O exit -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+        # A master whose handshake outlived the wait above would otherwise hold its
+        # port for good, and accumulated ports are what made connecting slow to
+        # begin with. This control path is unique to this invocation, so it can
+        # only ever match our own ssh — never Warp's master or another session's.
+        ( sleep 12; pkill -f "ControlPath=$ctl" 2&gt;/dev/null; rm -f "$ctl" ) &gt;/dev/null 2&gt;&amp;1 &amp;!
         rm -f "$ctl"
     fi
 
     # Stop the bridge only if we started it and no other session is still
-    # tunnelling. Match on the ControlPath, not on -R: the forward is requested
-    # over the mux, so it never appears in the master's argv, and matching it
-    # would miss live sessions and kill the bridge under them.
+    # tunnelling. Match on the ControlPath, not on -R: the forward is now
+    # requested over the mux, so it no longer appears in the master's argv and
+    # matching it would miss live sessions and kill the bridge under them. If our
+    # own master is still winding down we simply leave the bridge up, which is
+    # the harmless direction to be wrong in.
     if [[ -n $pid ]] &amp;&amp;
        ! pgrep -f "ControlPath=${TMPDIR:-/tmp}/clip-et-" &gt;/dev/null 2&gt;&amp;1; then
         kill "$pid" 2&gt;/dev/null

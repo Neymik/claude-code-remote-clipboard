@@ -64,6 +64,26 @@ sounds: every port below the first free one is held by a live session, so this w
 every connect, and paying a login per port put more than twenty seconds in front of the
 terminal on a high-latency link.
 
+And it runs **in the background**. The clipboard is a convenience, so it must never gate the
+terminal: `clip_et` hands off to `et` immediately and the tunnel attaches while `et` is still
+connecting. Opening a session costs `et`'s own connect and nothing else, no matter how slow
+or contended the tunnel setup turns out to be.
+
+## Watch out for terminals that rewrite `ssh`
+
+Warp reuses its own SSH connection (`warpify.ssh.reuse_existing_control_master`) by rewriting
+your invocation and **prepending** `-o ControlMaster=yes -o ControlPath=~/.ssh/<hash> -t`.
+ssh keeps the *first* value of an option, so Warp's control path wins and yours is never
+created. Two things follow, and both bite:
+
+- Your probes address a control socket you do not own.
+- `ssh -O exit` on that path closes **Warp's** master — and every session riding on it.
+
+So call the binary by absolute path (`/usr/bin/ssh`), which no alias, function or `PATH` shim
+can intercept, and treat `[[ -S $ctl ]]` as the precondition for touching the socket at all.
+If it is not there, connect without the bridge rather than close a connection that is not
+yours.
+
 The shim then routes each session to *its own* machine's clipboard, identifying the owner
 by the peer address of the process holding the tunnel — a fact from the kernel, not
 anything a session can set. Where ownership cannot be proved and more than one clipboard
