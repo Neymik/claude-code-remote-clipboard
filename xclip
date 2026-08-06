@@ -6,9 +6,22 @@
 #   xclip -selection clipboard -t image/png -o
 # Both are answered over a reverse tunnel back to the client.
 #
-# Each session tunnels on its own port, so the live one is found by scanning the
-# range below and asking each candidate to identify itself. Set CLIP_IMAGE_PORT to
-# skip the scan. Anything else is handed to the real xclip, if one is installed.
+# Each client machine tunnels on its own port, claimed by binding it (see
+# clip_et on the client side). Several machines can therefore be tunnelled here
+# at once, and "the first port that answers" is the WRONG one for all but one of
+# them -- it would hand this session another machine's clipboard, leaking
+# whatever that machine last copied. So the port is resolved by ownership:
+#
+#   1. $CLIP_IMAGE_PORT            explicit override, always wins
+#   2. the tunnel whose owning sshd is connected to THIS session's client
+#   3. the only clipboard on the range, if there is exactly one
+#   4. otherwise refuse -- never serve a clipboard we cannot attribute
+#
+# Step 2 reads the peer address of the sshd holding each listener. That comes
+# from the kernel, not from anything a session can set, so a session cannot
+# claim another machine's tunnel by editing its own environment.
+#
+# Anything that is not one of those two calls goes to the real xclip, if present.
 
 TOKEN='PASTE_YOUR_TOKEN_HERE'
 PORT_MIN=8377
@@ -34,19 +47,101 @@ get() {
 	esac
 }
 
+# client_ip -- the machine the human running this session is actually sitting at.
+client_ip() {
+	conn=$SSH_CONNECTION
+
+	# Inside tmux a pane keeps the environment of whichever client created the
+	# session. Re-attach from a second machine and that pane still advertises
+	# the first machine's IP, which would resolve to the first machine's
+	# clipboard. Ask tmux which client is attached NOW instead of trusting the
+	# environment we inherited.
+	if [ -n "$TMUX" ] && command -v tmux >/dev/null 2>&1; then
+		cpid=$(tmux display-message -p '#{client_pid}' 2>/dev/null)
+		if [ -n "$cpid" ] && [ -r "/proc/$cpid/environ" ]; then
+			fresh=$(tr '\0' '\n' <"/proc/$cpid/environ" 2>/dev/null |
+			        sed -n 's/^SSH_CONNECTION=//p' | head -1)
+			[ -n "$fresh" ] && conn=$fresh
+		fi
+	fi
+
+	printf '%s\n' "$conn" | awk '{print $1}'
+}
+
+# ports_owned_by <ip> -- ports in range whose reverse tunnel belongs to <ip>.
+ports_owned_by() {
+	_ip=$1
+	[ -n "$_ip" ] || return 0
+	command -v ss >/dev/null 2>&1 || return 0
+
+	# Every listener in range, with the pid holding it.
+	ss -ltnpH 2>/dev/null | awk -v min="$PORT_MIN" -v max="$PORT_MAX" '
+		{
+			addr = $4
+			sub(/.*:/, "", addr)
+			if (addr+0 < min || addr+0 > max) next
+			if (match($0, /pid=[0-9]+/))
+				print addr, substr($0, RSTART+4, RLENGTH-4)
+		}' | sort -u | while read -r _port _pid; do
+		# The sshd holding a -R listener also holds that client's connection,
+		# so its peer address identifies the machine the tunnel belongs to.
+		_peers=$(ss -tnpH 2>/dev/null | awk -v pid="$_pid" '
+			index($0, "pid=" pid ",") || index($0, "pid=" pid ")") {
+				peer = $5
+				sub(/:[0-9]+$/, "", peer)
+				gsub(/[][]/, "", peer)
+				print peer
+			}' | sort -u)
+
+		# Exactly one peer means the holder serves exactly one client, so the
+		# attribution is certain. A legacy `et -r` tunnel is held by etserver,
+		# which holds EVERY ET session at once -- picking one of its peers
+		# would be a guess, and guessing whose clipboard this is is precisely
+		# the leak being prevented. Leave it unattributed instead.
+		[ "$(printf '%s\n' "$_peers" | grep -c .)" -eq 1 ] || continue
+		[ "$_peers" = "$_ip" ] && printf '%s\n' "$_port"
+	done
+}
+
 discover() {
+	# 1. Explicit override always wins.
 	if [ -n "$CLIP_IMAGE_PORT" ]; then
 		printf '%s\n' "$CLIP_IMAGE_PORT"
 		return 0
 	fi
-	p=$PORT_MIN
-	while [ "$p" -le "$PORT_MAX" ]; do
+
+	myip=$(client_ip)
+
+	# 2. The tunnel this client machine owns.
+	for p in $(ports_owned_by "$myip"); do
 		if [ "$(get "$p" /id 3 2>/dev/null)" = "$MAGIC" ]; then
 			printf '%s\n' "$p"
 			return 0
 		fi
+	done
+
+	# 3./4. Nothing attributable. Count what is actually out there: with a
+	# single clipboard tunnelled here there is nothing to confuse it with, so
+	# use it. With two or more we cannot tell which is ours, and guessing means
+	# handing this session someone else's clipboard -- refuse instead.
+	found=''
+	n=0
+	p=$PORT_MIN
+	while [ "$p" -le "$PORT_MAX" ]; do
+		if [ "$(get "$p" /id 3 2>/dev/null)" = "$MAGIC" ]; then
+			n=$((n + 1))
+			[ -z "$found" ] && found=$p
+		fi
 		p=$((p + 1))
 	done
+
+	if [ "$n" -eq 1 ]; then
+		printf '%s\n' "$found"
+		return 0
+	fi
+	if [ "$n" -gt 1 ]; then
+		printf '%s\n' "xclip: $n clipboards are tunnelled to this host and none belongs to this session (client ${myip:-unknown}); refusing to paste rather than risk another machine's clipboard. Set CLIP_IMAGE_PORT to choose one deliberately." >&2
+	fi
 	return 1
 }
 

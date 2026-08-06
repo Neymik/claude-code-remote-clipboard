@@ -711,25 +711,31 @@ command -v xclip          # must print your shim's path</code></pre>
           <h3>Connect with a reverse tunnel</h3>
           <span class="where local">Your machine</span>
         </div>
-        <p>Start the clipboard server, then connect. The tunnel flag is the part people forget — without
-          it the shim just reports "no image".</p>
+        <p>Start the clipboard server, then carry it over an <code>ssh -R</code> tunnel and attach with
+          <code>et</code> separately. Tunnelling with <code>et -r</code> instead is what makes concurrent
+          sessions collide — see the warning below.</p>
         <div class="code">
           <pre><code>python3 ~/.local/bin/clip-image-server &amp;
 
-# Eternal Terminal -- source:destination is server port -&gt; client port.
-# Every session needs its own SERVER port; the client port stays fixed.
-et -r 8377:8377 user@host     # first session
-et -r 8378:8377 user@host     # a second, concurrent session
+# Claim the server-side port by BINDING it, never by checking first.
+# ExitOnForwardFailure turns a collision into a harmless non-zero exit,
+# so you can just try the next port.
+ssh -o ExitOnForwardFailure=yes -fN -R 8377:127.0.0.1:8377 user@host
 
-# or plain SSH
-ssh -R 8377:127.0.0.1:8377 user@host</code></pre>
+# then attach -- deliberately with NO -r, so etserver never binds for you
+et user@host</code></pre>
         </div>
         <div class="note warn">
-          <span class="tag">Two sessions cannot share a port</span>
+          <span class="tag">Never tunnel with <code>et -r</code></span>
           <p>A reverse-tunnel port is bound by the <code>etserver</code> <em>daemon</em>, not by your
-            session. Point a second session at a port another one already holds and ET kills it
-            outright — you get <code>Session terminated</code> and no shell at all. Increment the
-            server-side port per session, or let the function below choose one for you.</p>
+            session. When a second client asks it to bind a port that is already held, etserver does not
+            reject that one session — it <code>abort()</code>s
+            (<code>TcpSocketHandler.cpp:156, "Tried to listen twice on the same port"</code>), taking down
+            <em>every</em> session on the host. The daemon that is your way in is the thing that dies.</p>
+          <p>Checking first does not help: asking which port is free and using the answer a moment later is
+            a race, and every client asking at once is told the same port is free. <code>ssh -R</code> has
+            no such failure mode — a collision there is a warning, sshd stays up, and the bind attempt
+            <em>is</em> the test.</p>
           <p><code>Session terminated</code> printed <em>after</em> <code>logout</code> is just a normal
             goodbye. The failure looks like the same words appearing <em>instead of</em> a prompt.</p>
         </div>
@@ -780,9 +786,23 @@ ssh -R 8377:127.0.0.1:8377 user@host</code></pre>
         </thead>
         <tbody>
           <tr>
-            <td>Session ends instantly with <code>Session terminated</code>, no prompt</td>
-            <td>Another session already holds that reverse-tunnel port</td>
-            <td>Give each session its own server-side port</td>
+            <td>Every session dies at once with <code>Session terminated</code>, no prompt</td>
+            <td>Two clients asked <code>etserver</code> to bind the same reverse-tunnel port, so the
+              daemon aborted and took all sessions with it</td>
+            <td>Tunnel with <code>ssh -R</code> and attach with a bare <code>et</code>; never
+              <code>et -r</code></td>
+          </tr>
+          <tr>
+            <td><code>refusing to paste rather than risk another machine's clipboard</code></td>
+            <td>Several machines are tunnelled to this host and the shim cannot prove which clipboard
+              belongs to this session</td>
+            <td>Working as intended — it will not guess. Set <code>CLIP_IMAGE_PORT</code> to pick one
+              deliberately, or reconnect so the tunnel is attributable</td>
+          </tr>
+          <tr>
+            <td>Paste returns someone else's screenshot</td>
+            <td>An old shim that used the first port answering on the scan range</td>
+            <td>Update the shim; it now routes by the client that owns the tunnel</td>
           </tr>
           <tr>
             <td>Prints nothing, even with an image copied</td>
@@ -824,7 +844,8 @@ ssh -R 8377:127.0.0.1:8377 user@host</code></pre>
     local host="${1:?usage: clip_et &lt;host&gt; [et args...]}"
     shift
     local local_port="${CLIP_IMAGE_PORT:-8377}"
-    local pid= remote_port= used=
+    local port_min="${CLIP_PORT_MIN:-8377}" port_max="${CLIP_PORT_MAX:-8420}"
+    local pid= remote_port= ctl=
 
     # One bridge per machine, shared by every session
     if ! nc -z 127.0.0.1 "$local_port" 2&gt;/dev/null; then
@@ -837,28 +858,41 @@ ssh -R 8377:127.0.0.1:8377 user@host</code></pre>
         done
     fi
 
-    # etserver binds a reverse-tunnel port globally, not per session, so two
-    # sessions sharing one port kill each other. Claim a port nobody holds.
-    used=$(ssh -o ConnectTimeout=10 -o BatchMode=yes "$host" \
-               "ss -ltnH 2&gt;/dev/null | awk '{print \$4}' | sed 's/.*://'" 2&gt;/dev/null)
-    if [[ -n $used ]]; then
-        local p
-        for p in {8377..8420}; do
-            print -r -- "$used" | grep -qx "$p" || { remote_port=$p; break }
-        done
+    # Claim a port by BINDING it, never by asking whether it is free. Asking and
+    # using the answer later is a race the whole handshake fits through: the
+    # answer comes from server state every client is racing to change, so
+    # several machines asking at once are all told the same port is free -- and
+    # etserver's second listen() is a hard abort() that kills EVERY session on
+    # the host, not just the loser. ssh -R with ExitOnForwardFailure turns a
+    # collision into a harmless non-zero exit, so the bind IS the test.
+    ctl="${TMPDIR:-/tmp}/clip-et-$$-${RANDOM}.ctl"
+    local p
+    for p in {${port_min}..${port_max}}; do
+        if ssh -o ExitOnForwardFailure=yes \
+               -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+               -o ControlMaster=yes -o ControlPath="$ctl" \
+               -o ConnectTimeout=10 -o BatchMode=yes \
+               -fN -R "${p}:127.0.0.1:${local_port}" "$host" 2&gt;/dev/null
+        then
+            remote_port=$p
+            break
+        fi
+    done
+    if [[ -z $remote_port ]]; then
+        ctl=
+        print -u2 "clip_et: no free port in ${port_min}-${port_max} on $host - connecting without the clipboard bridge"
     fi
 
-    # Losing the bridge must never cost you the session
-    if [[ -n $remote_port ]]; then
-        et -r "$remote_port:$local_port" "$@" "$host"
-    else
-        print -u2 "clip_et: no remote port available - connecting without the clipboard bridge"
-        et "$@" "$host"
-    fi
+    # Deliberately no -r: etserver never listen()s on our behalf, so the abort
+    # above is unreachable rather than merely less likely.
+    et "$@" "$host"
     local rc=$?
 
+    # The tunnel dies with the session
+    [[ -n $ctl ]] &amp;&amp; ssh -O exit -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+
     # Stop the bridge only if we started it and nothing else is still tunnelling
-    if [[ -n $pid ]] &amp;&amp; ! pgrep -f 'et -r [0-9]' &gt;/dev/null 2&gt;&amp;1; then
+    if [[ -n $pid ]] &amp;&amp; ! pgrep -f "ssh.*-R [0-9]*:127.0.0.1:$local_port" &gt;/dev/null 2&gt;&amp;1; then
         kill "$pid" 2&gt;/dev/null
     fi
     return $rc

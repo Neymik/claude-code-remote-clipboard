@@ -44,13 +44,23 @@ Nothing leaves your machine until you actually press Ctrl+V on the server.
 
 Both scripts need a shared token pasted in before use — the guide covers it.
 
-## One port per session
+## One port per session — claimed by binding, never by asking
 
-A reverse-tunnel port is bound by the `etserver` *daemon*, not by your session. Point a
-second session at a port another one already holds and Eternal Terminal kills it
-outright: you get `Session terminated` and no shell at all. Give every session its own
-server-side port and keep the client port fixed — the shim finds the live tunnel by
-scanning, so it does not care which port it got.
+A reverse-tunnel port is bound by the `etserver` *daemon*, not by your session. Ask it to
+bind a port another client already holds and it does not fail that one request — it
+`abort()`s (`TcpSocketHandler.cpp:156`, *"Tried to listen twice on the same port"*) and
+every session on the host dies with `Session terminated`.
+
+Checking first does not fix it. Asking which port is free and using the answer a moment
+later is a race as wide as the whole handshake, and clients racing each other are all told
+the same port is free. So don't ask — **try**: tunnel with
+`ssh -o ExitOnForwardFailure=yes -fN -R`, which turns a collision into a harmless non-zero
+exit, and attach with a bare `et` (no `-r`) so `etserver` never binds on your behalf.
+
+The shim then routes each session to *its own* machine's clipboard, identifying the owner
+by the peer address of the process holding the tunnel — a fact from the kernel, not
+anything a session can set. Where ownership cannot be proved and more than one clipboard
+is reachable, it refuses to paste rather than hand over another machine's clipboard.
 
 ## Status
 
@@ -66,3 +76,21 @@ macOS branch has been run; the other two follow the same shape but are untested.
 While the tunnel is up, anyone with shell access on that server can pull whatever image
 is on your clipboard. Fine for a machine you own, bad for a shared one. The token limits
 casual access, not someone who can read the shim.
+
+**Between machines**, the shim will not guess. With several people tunnelled to one host,
+"use the first port that answers" hands your session someone else's clipboard — a silent
+leak of whatever they last copied, which looks only like "my paste didn't update". Each
+session is therefore matched to the tunnel whose owning process is connected to *that
+session's* client address, read from the kernel rather than from the environment, so a
+session cannot claim another machine's tunnel by editing its own variables. Two caveats
+worth knowing:
+
+- Ownership is only asserted when the process holding a tunnel serves exactly one client
+  address. A legacy `et -r` tunnel is held by `etserver`, which holds every session at
+  once, so with two machines connected it is deliberately left unattributed.
+- Inside `tmux` a pane keeps the environment of whichever client created the session, so
+  the currently attached client is asked instead — otherwise re-attaching from a second
+  machine would resolve to the first machine's clipboard.
+
+When ownership cannot be established and more than one clipboard is reachable, the paste
+is refused. A missing paste is recoverable; a leaked clipboard is not.
