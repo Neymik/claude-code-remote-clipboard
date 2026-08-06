@@ -793,6 +793,14 @@ et user@host</code></pre>
               <code>et -r</code></td>
           </tr>
           <tr>
+            <td>The terminal takes tens of seconds to open</td>
+            <td>The port walk is opening a fresh SSH connection per taken port, and every port
+              below the first free one is held by a live session — at 250&nbsp;ms round trip that is
+              about three seconds each</td>
+            <td>Probe with <code>ssh -O forward</code> over one <code>ControlMaster</code>, as
+              below; a taken port then costs a round trip instead of a login</td>
+          </tr>
+          <tr>
             <td><code>refusing to paste rather than risk another machine's clipboard</code></td>
             <td>Several machines are tunnelled to this host and the shim cannot prove which clipboard
               belongs to this session</td>
@@ -863,21 +871,32 @@ et user@host</code></pre>
     # answer comes from server state every client is racing to change, so
     # several machines asking at once are all told the same port is free -- and
     # etserver's second listen() is a hard abort() that kills EVERY session on
-    # the host, not just the loser. ssh -R with ExitOnForwardFailure turns a
-    # collision into a harmless non-zero exit, so the bind IS the test.
+    # the host, not just the loser. So the bind IS the test.
+    #
+    # Probe over ONE multiplexed connection instead of logging in per port. sshd
+    # still performs the listen() and reports the failure, so the guarantee is
+    # unchanged, but a taken port costs a round trip rather than a full handshake.
+    # Every port below the first free one is held by a live session, so this walk
+    # happens on every connect -- logging in per port put &gt;20s in front of the
+    # terminal on a high-latency link.
     ctl="${TMPDIR:-/tmp}/clip-et-$$-${RANDOM}.ctl"
-    local p
-    for p in {${port_min}..${port_max}}; do
-        if ssh -o ExitOnForwardFailure=yes \
-               -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
-               -o ControlMaster=yes -o ControlPath="$ctl" \
-               -o ConnectTimeout=10 -o BatchMode=yes \
-               -fN -R "${p}:127.0.0.1:${local_port}" "$host" 2&gt;/dev/null
-        then
-            remote_port=$p
-            break
-        fi
-    done
+    if ssh -o ControlMaster=yes -o ControlPath="$ctl" \
+           -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+           -o ConnectTimeout=10 -o BatchMode=yes \
+           -fN "$host" 2&gt;/dev/null
+    then
+        local p
+        for p in {${port_min}..${port_max}}; do
+            if ssh -O forward -R "${p}:127.0.0.1:${local_port}" \
+                   -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+            then
+                remote_port=$p
+                break
+            fi
+        done
+        # An idle master with no forward is just a leak
+        [[ -n $remote_port ]] || ssh -O exit -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+    fi
     if [[ -z $remote_port ]]; then
         ctl=
         print -u2 "clip_et: no free port in ${port_min}-${port_max} on $host - connecting without the clipboard bridge"
@@ -889,10 +908,17 @@ et user@host</code></pre>
     local rc=$?
 
     # The tunnel dies with the session
-    [[ -n $ctl ]] &amp;&amp; ssh -O exit -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+    if [[ -n $ctl ]]; then
+        ssh -O exit -o ControlPath="$ctl" "$host" 2&gt;/dev/null
+        rm -f "$ctl"
+    fi
 
-    # Stop the bridge only if we started it and nothing else is still tunnelling
-    if [[ -n $pid ]] &amp;&amp; ! pgrep -f "ssh.*-R [0-9]*:127.0.0.1:$local_port" &gt;/dev/null 2&gt;&amp;1; then
+    # Stop the bridge only if we started it and no other session is still
+    # tunnelling. Match on the ControlPath, not on -R: the forward is requested
+    # over the mux, so it never appears in the master's argv, and matching it
+    # would miss live sessions and kill the bridge under them.
+    if [[ -n $pid ]] &amp;&amp;
+       ! pgrep -f "ControlPath=${TMPDIR:-/tmp}/clip-et-" &gt;/dev/null 2&gt;&amp;1; then
         kill "$pid" 2&gt;/dev/null
     fi
     return $rc

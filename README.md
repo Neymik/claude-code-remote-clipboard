@@ -53,9 +53,16 @@ every session on the host dies with `Session terminated`.
 
 Checking first does not fix it. Asking which port is free and using the answer a moment
 later is a race as wide as the whole handshake, and clients racing each other are all told
-the same port is free. So don't ask — **try**: tunnel with
-`ssh -o ExitOnForwardFailure=yes -fN -R`, which turns a collision into a harmless non-zero
-exit, and attach with a bare `et` (no `-r`) so `etserver` never binds on your behalf.
+the same port is free. So don't ask — **try**: request the forward with
+`ssh -O forward -R`, which turns a collision into a harmless non-zero exit, and attach with
+a bare `et` (no `-r`) so `etserver` never binds on your behalf.
+
+The probes go over a **single multiplexed connection**, not one login each. `sshd` still
+performs the `listen()` and still reports the failure, so the bind is still the test — but
+a taken port costs a round trip instead of a full handshake. That matters more than it
+sounds: every port below the first free one is held by a live session, so this walk runs on
+every connect, and paying a login per port put more than twenty seconds in front of the
+terminal on a high-latency link.
 
 The shim then routes each session to *its own* machine's clipboard, identifying the owner
 by the peer address of the process holding the tunnel — a fact from the kernel, not
