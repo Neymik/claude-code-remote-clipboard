@@ -406,7 +406,7 @@ xclip -selection clipboard -t image/png -o &gt; /tmp/&lt;tempfile&gt;</code></pr
           <li>Linux, with Claude Code installed</li>
           <li><code>curl</code> or <code>wget</code></li>
           <li>Write access to a directory in <code>PATH</code></li>
-          <li>Port <code>8377</code> free on loopback</li>
+          <li>Loopback ports <code>8377–8420</code>, one per open session</li>
         </ul>
       </div>
     </div>
@@ -571,7 +571,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()</code></pre>
+    main()
+</code></pre>
         </div>
         <div class="note warn">
           <span class="tag">Verified where</span>
@@ -609,6 +610,9 @@ cat ~/.config/clip-image-server/token   # copy this, you need it in step 3</code
         </div>
         <p>Save this as <code>/usr/local/bin/xclip</code> — or anywhere in <code>PATH</code> that comes
           before a real <code>xclip</code>. Paste your token into the <code>TOKEN</code> line.</p>
+        <p>With several machines tunnelled to one server, it sends each session to <em>its own</em>
+          machine's tunnel, found from the kernel rather than the environment. When it cannot tell
+          which tunnel is yours, it refuses to paste rather than guess.</p>
         <div class="code">
           <span class="code-label">/usr/local/bin/xclip</span>
           <pre><code>#!/bin/sh
@@ -619,9 +623,22 @@ cat ~/.config/clip-image-server/token   # copy this, you need it in step 3</code
 #   xclip -selection clipboard -t image/png -o
 # Both are answered over a reverse tunnel back to the client.
 #
-# Each session tunnels on its own port, so the live one is found by scanning the
-# range below and asking each candidate to identify itself. Set CLIP_IMAGE_PORT to
-# skip the scan. Anything else is handed to the real xclip, if one is installed.
+# Each client machine tunnels on its own port, claimed by binding it (see
+# clip_et on the client side). Several machines can therefore be tunnelled here
+# at once, and "the first port that answers" is the WRONG one for all but one of
+# them -- it would hand this session another machine's clipboard, leaking
+# whatever that machine last copied. So the port is resolved by ownership:
+#
+#   1. $CLIP_IMAGE_PORT            explicit override, always wins
+#   2. the tunnel whose owning sshd is connected to THIS session's client
+#   3. the only clipboard on the range, if there is exactly one
+#   4. otherwise refuse -- never serve a clipboard we cannot attribute
+#
+# Step 2 reads the peer address of the sshd holding each listener. That comes
+# from the kernel, not from anything a session can set, so a session cannot
+# claim another machine's tunnel by editing its own environment.
+#
+# Anything that is not one of those two calls goes to the real xclip, if present.
 
 TOKEN='PASTE_YOUR_TOKEN_HERE'
 PORT_MIN=8377
@@ -647,19 +664,101 @@ get() {
 	esac
 }
 
+# client_ip -- the machine the human running this session is actually sitting at.
+client_ip() {
+	conn=$SSH_CONNECTION
+
+	# Inside tmux a pane keeps the environment of whichever client created the
+	# session. Re-attach from a second machine and that pane still advertises
+	# the first machine's IP, which would resolve to the first machine's
+	# clipboard. Ask tmux which client is attached NOW instead of trusting the
+	# environment we inherited.
+	if [ -n "$TMUX" ] &amp;&amp; command -v tmux &gt;/dev/null 2&gt;&amp;1; then
+		cpid=$(tmux display-message -p '#{client_pid}' 2&gt;/dev/null)
+		if [ -n "$cpid" ] &amp;&amp; [ -r "/proc/$cpid/environ" ]; then
+			fresh=$(tr '\0' '\n' &lt;"/proc/$cpid/environ" 2&gt;/dev/null |
+			        sed -n 's/^SSH_CONNECTION=//p' | head -1)
+			[ -n "$fresh" ] &amp;&amp; conn=$fresh
+		fi
+	fi
+
+	printf '%s\n' "$conn" | awk '{print $1}'
+}
+
+# ports_owned_by &lt;ip&gt; -- ports in range whose reverse tunnel belongs to &lt;ip&gt;.
+ports_owned_by() {
+	_ip=$1
+	[ -n "$_ip" ] || return 0
+	command -v ss &gt;/dev/null 2&gt;&amp;1 || return 0
+
+	# Every listener in range, with the pid holding it.
+	ss -ltnpH 2&gt;/dev/null | awk -v min="$PORT_MIN" -v max="$PORT_MAX" '
+		{
+			addr = $4
+			sub(/.*:/, "", addr)
+			if (addr+0 &lt; min || addr+0 &gt; max) next
+			if (match($0, /pid=[0-9]+/))
+				print addr, substr($0, RSTART+4, RLENGTH-4)
+		}' | sort -u | while read -r _port _pid; do
+		# The sshd holding a -R listener also holds that client's connection,
+		# so its peer address identifies the machine the tunnel belongs to.
+		_peers=$(ss -tnpH 2&gt;/dev/null | awk -v pid="$_pid" '
+			index($0, "pid=" pid ",") || index($0, "pid=" pid ")") {
+				peer = $5
+				sub(/:[0-9]+$/, "", peer)
+				gsub(/[][]/, "", peer)
+				print peer
+			}' | sort -u)
+
+		# Exactly one peer means the holder serves exactly one client, so the
+		# attribution is certain. A legacy `et -r` tunnel is held by etserver,
+		# which holds EVERY ET session at once -- picking one of its peers
+		# would be a guess, and guessing whose clipboard this is is precisely
+		# the leak being prevented. Leave it unattributed instead.
+		[ "$(printf '%s\n' "$_peers" | grep -c .)" -eq 1 ] || continue
+		[ "$_peers" = "$_ip" ] &amp;&amp; printf '%s\n' "$_port"
+	done
+}
+
 discover() {
+	# 1. Explicit override always wins.
 	if [ -n "$CLIP_IMAGE_PORT" ]; then
 		printf '%s\n' "$CLIP_IMAGE_PORT"
 		return 0
 	fi
-	p=$PORT_MIN
-	while [ "$p" -le "$PORT_MAX" ]; do
+
+	myip=$(client_ip)
+
+	# 2. The tunnel this client machine owns.
+	for p in $(ports_owned_by "$myip"); do
 		if [ "$(get "$p" /id 3 2&gt;/dev/null)" = "$MAGIC" ]; then
 			printf '%s\n' "$p"
 			return 0
 		fi
+	done
+
+	# 3./4. Nothing attributable. Count what is actually out there: with a
+	# single clipboard tunnelled here there is nothing to confuse it with, so
+	# use it. With two or more we cannot tell which is ours, and guessing means
+	# handing this session someone else's clipboard -- refuse instead.
+	found=''
+	n=0
+	p=$PORT_MIN
+	while [ "$p" -le "$PORT_MAX" ]; do
+		if [ "$(get "$p" /id 3 2&gt;/dev/null)" = "$MAGIC" ]; then
+			n=$((n + 1))
+			[ -z "$found" ] &amp;&amp; found=$p
+		fi
 		p=$((p + 1))
 	done
+
+	if [ "$n" -eq 1 ]; then
+		printf '%s\n' "$found"
+		return 0
+	fi
+	if [ "$n" -gt 1 ]; then
+		printf '%s\n' "xclip: $n clipboards are tunnelled to this host and none belongs to this session (client ${myip:-unknown}); refusing to paste rather than risk another machine's clipboard. Set CLIP_IMAGE_PORT to choose one deliberately." &gt;&amp;2
+	fi
 	return 1
 }
 
@@ -713,7 +812,8 @@ command -v xclip          # must print your shim's path</code></pre>
         </div>
         <p>Start the clipboard server, then carry it over an <code>ssh -R</code> tunnel and attach with
           <code>et</code> separately. Tunnelling with <code>et -r</code> instead is what makes concurrent
-          sessions collide — see the warning below.</p>
+          sessions collide — see the warning below. These are the manual steps;
+          <a href="#clip-et"><code>clip_et</code></a> does all of it in one command.</p>
         <div class="code">
           <pre><code>python3 ~/.local/bin/clip-image-server &amp;
 
@@ -828,7 +928,43 @@ et user@host</code></pre>
           <tr>
             <td>Prints nothing, even with an image copied</td>
             <td>No reverse tunnel on this connection</td>
-            <td>Reconnect with <code>-r</code> / <code>-R</code></td>
+            <td>Reconnect with <code>clip_et</code>, or <code>ssh -R</code> by hand — never
+              <code>et -r</code></td>
+          </tr>
+          <tr>
+            <td>Paste worked, then stopped after the laptop slept or changed networks</td>
+            <td>ET reconnected on its own. The <code>ssh -R</code> tunnel next to it is a plain TCP
+              connection, and it died</td>
+            <td>Open a fresh session to get a fresh tunnel. <code>clip_et</code> does not
+              rebuild a tunnel that has dropped</td>
+          </tr>
+          <tr>
+            <td>Paste never works in new sessions, and every port in the range is held by
+              <code>sshd</code></td>
+            <td>Orphaned tunnels from sessions that ended without <code>et</code> returning
+              (window closed, terminal app quit) hold every port</td>
+            <td>Run <code>clip_reap</code> to list them and <code>clip_reap -f</code> to close them.
+              End sessions with <code>exit</code> from now on</td>
+          </tr>
+          <tr>
+            <td>Your other sessions on the host all died the moment you connected</td>
+            <td>You connected with <code>et -x</code>, which runs <code>pkill etterminal -u
+              &lt;user&gt;</code> first: live sessions are killed along with stale ones</td>
+            <td>Drop <code>-x</code> unless this is your only session</td>
+          </tr>
+          <tr>
+            <td>Opening several sessions at once: all but one die with
+              <code>FATAL ... createLogFile</code></td>
+            <td><code>et</code> names its client log after the current second and creates it
+              exclusively, so clients started in the same second collide</td>
+            <td>Give each its own <code>--logdir</code>; <code>clip_et</code> passes it through</td>
+          </tr>
+          <tr>
+            <td>In Warp: the server prompt appears, then the pane hangs on
+              <em>"Starting shell…"</em></td>
+            <td>The server's <code>~/.bashrc</code> Warpify hook. On some Warp builds it makes Warp
+              open a hidden ssh connection of its own and wait for it forever</td>
+            <td>Keep the hook quiet under ET, as shown <a href="#warp-hook">below</a></td>
           </tr>
           <tr>
             <td>A real <code>xclip</code> runs instead of the shim</td>
@@ -855,20 +991,80 @@ et user@host</code></pre>
     </div>
   </section>
 
-  <section>
+  <section id="clip-et">
     <h2>Optional: one command instead of three</h2>
-    <p class="prose">This zsh function starts the bridge only when it's needed, and stops it when the
-      connection ends — unless another session is still using it. Add it to <code>~/.zshrc</code>.</p>
+    <p class="prose"><code>clip_et</code> starts the bridge only when it's needed and stops it when the
+      connection ends, unless another session is still using it. Extra arguments go straight to
+      <code>et</code>. <code>clip_reap</code> lists tunnels left behind by sessions that never got
+      to clean up, and closes them only when you add <code>-f</code>. Save the file as
+      <a href="https://github.com/Neymik/claude-code-remote-clipboard/blob/main/clip_et.zsh"><code>clip_et.zsh</code></a>
+      and add <code>source /path/to/clip_et.zsh</code> to <code>~/.zshrc</code>.</p>
     <div class="code">
-      <span class="code-label">~/.zshrc</span>
-      <pre><code>clip_et() {
+      <span class="code-label">clip_et.zsh</span>
+      <pre><code># Clipboard image bridge for remote Claude Code sessions -- source from ~/.zshrc.
+#
+#   clip_et &lt;host&gt; [et args...]   connect with the clipboard tunnelled alongside
+#   clip_reap [-f]                report (and with -f, close) orphaned tunnels
+#
+# Serves the local clipboard on 127.0.0.1:$CLIP_IMAGE_PORT and reverse-tunnels it,
+# so Ctrl+V pastes screenshots on the remote. Lives only as long as the connection.
+
+# Report tunnel masters whose session is gone -- and, only with -f, close them.
+#
+# `ssh -fN` detaches to init, so nothing reaps it: clip_et's own teardown runs
+# only when `et` returns. Close the terminal window, quit the terminal app or
+# kill the shell, and that master keeps its remote port for the life of the
+# host. The range is finite, so leaks do eventually block connecting.
+#
+# Deliberately NOT called automatically, and it never acts without -f:
+#   * an earlier auto-running version also reaped on "control socket missing",
+#     which races a tunnel that simply has not finished connecting yet;
+#   * closing an ssh nobody asked to close is not this function's decision.
+#
+# The only signal is the PID embedded in the control path
+# (clip-et-&lt;pid&gt;-&lt;rand&gt;.ctl): the shell that ran clip_et. A living PID means
+# leave alone, so this can only ever under-reap.
+clip_reap() {
+    local act=0
+    [[ $1 == -f ]] &amp;&amp; act=1
+    local proc cpath base spid n=0
+    for proc in ${(f)"$(pgrep -f 'ControlPath=[^ ]*clip-et-' 2&gt;/dev/null)"}; do
+        [[ -n $proc ]] || continue
+        [[ $(ps -o comm= -p "$proc" 2&gt;/dev/null) == *ssh ]] || continue
+        cpath=$(ps -o command= -p "$proc" 2&gt;/dev/null |
+                sed -n 's/.*ControlPath=\([^ ]*\).*/\1/p')
+        [[ -n $cpath ]] || continue
+        base=${cpath:t}
+        spid=${${base#clip-et-}%%-*}
+        [[ $spid == &lt;-&gt; ]] || continue
+        kill -0 "$spid" 2&gt;/dev/null &amp;&amp; continue
+        (( n++ ))
+        if (( act )); then
+            print -r "clip_reap: closing ssh $proc (owner $spid gone)"
+            kill "$proc" 2&gt;/dev/null
+            rm -f "$cpath"
+        else
+            print -r "clip_reap: orphan ssh $proc, owner $spid gone"
+        fi
+    done
+    (( n )) || { print -r "clip_reap: no orphaned tunnels"; return 0 }
+    (( act )) || print -r "clip_reap: nothing closed -- run 'clip_reap -f' to close them"
+}
+
+clip_et() {
     local host="${1:?usage: clip_et &lt;host&gt; [et args...]}"
     shift
     local local_port="${CLIP_IMAGE_PORT:-8377}"
+    # The ceiling must match PORT_MAX in the server's xclip shim, which only
+    # scans PORT_MIN..PORT_MAX: a port claimed above it is invisible to the shim
+    # and paste silently stops working. If something permanently squats the
+    # bottom of the range (legacy `et -r` tunnels held by etserver, say), raise
+    # CLIP_PORT_MIN past it rather than paying a probe per squatter on every
+    # connect.
     local port_min="${CLIP_PORT_MIN:-8377}" port_max="${CLIP_PORT_MAX:-8420}"
     local pid= remote_port= ctl=
 
-    # CLIP_ET_DEBUG=1 svo  -&gt;  where the time actually goes. Off by default.
+    # CLIP_ET_DEBUG=1 clip_et host  -&gt;  where the time actually goes. Off by default.
     zmodload zsh/datetime 2&gt;/dev/null
     local _t0=${EPOCHREALTIME:-0}
     _clip_lap() {
@@ -1005,11 +1201,117 @@ alias myserver="clip_et user@host"
   </section>
 
   <section>
-    <h2>Warp, Eternal Terminal and Claude Code</h2>
+    <h2>Eternal Terminal on a busy server</h2>
+    <p class="prose">Lessons from one host carrying many concurrent ET sessions from more than one
+      machine. Most of them only show up once there is more than one session.</p>
+
+    <div class="ledger">
+      <div class="ledger-card">
+        <h3><code>et -x</code> takes your live sessions too</h3>
+        <p><code>etserver</code> keeps sessions alive so you can resume them, so abandoned ones pile up
+          as <code>etterminal</code> processes. <code>et -x</code> sweeps them by running
+          <code>pkill etterminal -u &lt;user&gt;</code> before it logs in. That kills
+          <em>every</em> session you have on the host, including the live ones in your other tabs. Use it
+          only when this is your only session; otherwise kill the specific leftover PIDs.</p>
+      </div>
+
+      <div class="ledger-card">
+        <h3>ET roams; the tunnel doesn't</h3>
+        <p>ET survives a closed lid and a changed IP address. The <code>ssh -R</code> next to it is a
+          plain TCP connection, so a network change kills it, and nothing rebuilds it. The session looks
+          healthy but paste stops working. Open a fresh session to get a fresh tunnel. A machine left
+          connected overnight can show every <code>et</code> client still attached and no tunnel
+          left at all.</p>
+      </div>
+
+      <div class="ledger-card">
+        <h3>One log directory per client</h3>
+        <p><code>et</code> 6.2.x names its client log after the current <em>second</em> and creates it
+          exclusively. If a script opens several sessions at once, all but one abort with
+          <code>FATAL ... createLogFile</code>, and the errno it prints is wrong. Give each client its
+          own directory:</p>
+        <div class="code">
+          <pre><code>clip_et host --logdir /tmp/et-$RANDOM</code></pre>
+        </div>
+      </div>
+
+      <div class="ledger-card">
+        <h3>Through a jumphost, spell it out</h3>
+        <p>ET reads <code>ProxyJump</code> from <code>~/.ssh/config</code>, then opens TCP to the alias
+          <em>name</em> and logs in with the <em>destination's</em> user. Pass the jump explicitly.
+          <code>-p</code> is the destination's etserver port as the jumphost sees it.
+          <code>--terminal-path</code> applies to both hops, so use a <code>PATH=</code> prefix rather
+          than an absolute path:</p>
+        <div class="code">
+          <pre><code>clip_et dest --jumphost user@jump.example.com -p 2023 \
+  --terminal-path 'PATH=/opt/homebrew/bin:$PATH etterminal'</code></pre>
+        </div>
+      </div>
+
+      <div class="ledger-card">
+        <h3>The crash reason isn't in the journal</h3>
+        <p>systemd only records <code>status=6/ABRT</code>. The <code>abort()</code> message is in
+          <code>etserver-&lt;start time&gt;_&lt;pid&gt;.log</code> under etserver's
+          <code>logdirectory</code> (default <code>/tmp</code>). The name carries the process's
+          <em>start</em> time, so a crash is in the log of the process started <em>before</em> it.</p>
+        <div class="code">
+          <pre><code>grep -l 'listen twice' /tmp/etserver-*.log</code></pre>
+        </div>
+      </div>
+
+      <div class="ledger-card">
+        <h3>End with <code>exit</code>; reap the rest</h3>
+        <p><code>clip_et</code> can only clean up its tunnel after <code>et</code> returns. If you close
+          the window or quit the terminal app instead, the <code>ssh -fN</code> master stays behind. It
+          belongs to init and keeps its remote port for as long as the server stays up. Enough of those
+          and new sessions get no port at all. <code>clip_reap</code> lists them, and
+          <code>clip_reap -f</code> closes them. Its only signal is the shell PID embedded in the
+          control path, so it can miss an orphan but never closes a live tunnel.</p>
+      </div>
+
+      <div class="ledger-card">
+        <h3>Read the port table before calling a leak</h3>
+        <p>On the server, ports held by <code>sshd</code> are current-style tunnels, one per live
+          session. Ports held by <code>etserver</code> are legacy <code>et -r</code> tunnels that clear
+          only when those sessions end. If they squat the bottom of the range, raise
+          <code>CLIP_PORT_MIN</code> past them. Never raise <code>CLIP_PORT_MAX</code> above the
+          shim's <code>PORT_MAX</code>: the shim would never see those ports.</p>
+        <div class="code">
+          <pre><code>ss -ltnp '( sport &gt;= :8377 and sport &lt;= :8420 )'</code></pre>
+        </div>
+      </div>
+
+      <div class="ledger-card">
+        <h3>Testing <code>et</code> needs a real pty</h3>
+        <p>Without a console fd, <code>et</code> aborts at <code>TerminalClient.cpp:244</code>, so a
+          tty-less harness fails for reasons unrelated to what you are testing. Drive it with
+          <code>expect</code>. For timings, <code>CLIP_ET_DEBUG=1 clip_et host</code> prints each
+          stage. Measure before you guess.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="warp-hook">
+    <h2>Warp and Claude Code</h2>
     <p class="prose">Things that bite in this particular combination, all of them met while getting the
       bridge working.</p>
 
     <div class="ledger">
+      <div class="ledger-card">
+        <h3>Warp's rc hook can hijack an ET session</h3>
+        <p>Warpify puts a line in the server's <code>~/.bashrc</code> that prints a
+          <code>SourcedRcFileForWarp</code> escape on every interactive shell. On some Warp builds, seeing
+          it arrive over ET makes Warp open a hidden ssh connection of its own and wait on
+          <em>"Starting shell…"</em> forever, while the ET session is alive the whole time. If yours
+          does this, keep the hook quiet under ET and leave it on for plain ssh. Under ET the shell's
+          parent is <code>etterminal</code>; under ssh it is <code>sshd</code>:</p>
+        <div class="code">
+          <pre><code>[[ "$-" == *i* ]] \
+  &amp;&amp; [[ "$(ps -o comm= -p $PPID 2&gt;/dev/null)" != *etterminal* ]] \
+  &amp;&amp; printf '\eP$f{"hook": "SourcedRcFileForWarp", ...}\x9c'   # Warp's original line</code></pre>
+        </div>
+      </div>
+
       <div class="ledger-card">
         <h3>Pin your locale</h3>
         <p>Warp exports an <code>LC_CTYPE</code> value Linux does not recognise, and both SSH and ET
@@ -1022,17 +1324,13 @@ export LC_ALL=en_US.UTF-8</code></pre>
       </div>
 
       <div class="ledger-card">
-        <h3>Run Claude Code inside tmux</h3>
-        <p>ET survives dropped networks and a closed laptop lid, so the session keeps going. What it does
-          not survive is you restarting <code>et</code> — and you will, whenever you want a fresh tunnel.
-          Start Claude Code inside <code>tmux</code> on the server and reconnecting costs you nothing.</p>
-      </div>
-
-      <div class="ledger-card">
-        <h3>Sweep up old ET sessions</h3>
-        <p><code>etserver</code> keeps sessions alive so you can resume them, which means abandoned ones
-          pile up as <code>etterminal</code> processes — a working server had seven. Connect with
-          <code>et -x</code> to kill your own leftovers first.</p>
+        <h3>Persistence: tmux by hand, not at login</h3>
+        <p>Running Claude Code inside <code>tmux</code> on the server is fine, and the shim handles it by
+          asking tmux which client is attached now. Don't auto-start it from a login hook to survive
+          <code>etserver</code> crashes, though. tmux does not stop the crash, it only lets you
+          re-attach afterwards. Fix the crash (no <code>et -r</code>) and leave login alone. A
+          client-side <code>dtach</code> around <code>clip_et</code> survives quitting the terminal app,
+          but Warp's blocks stop working through it.</p>
       </div>
 
       <div class="ledger-card">
@@ -1045,8 +1343,9 @@ export LC_ALL=en_US.UTF-8</code></pre>
       <div class="ledger-card">
         <h3>Warp's shell integration leaks into pipes</h3>
         <p>Capture an ET session's output to a file and you will find a <code>SourcedRcFileForWarp</code>
-          JSON line mixed in with terminal escapes. Harmless, but pipe through <code>strings</code> when
-          you are trying to read what actually happened.</p>
+          JSON line mixed in with terminal escapes. Pipe through <code>strings</code> when you are trying
+          to read what actually happened. It is harmless in a file. Echo that raw stream back into a Warp
+          pane, from a script or a tool, and Warp acts on the hook as if the server had sent it.</p>
       </div>
 
       <div class="ledger-card">
@@ -1079,7 +1378,9 @@ export LC_ALL=en_US.UTF-8</code></pre>
 
   <footer>
     <p>Tested with Claude Code 2.1.220 on both ends: macOS client, Ubuntu 24.04 server, over Eternal
-      Terminal and OpenSSH. A PNG round-tripped byte-identical across both transports.</p>
+      Terminal and OpenSSH. A PNG round-tripped byte-identical across both transports. In daily use
+      since with <code>et</code> 6.2.x clients against <code>etserver</code> 7.0.0, with several
+      sessions open at once.</p>
     <p>Scripts and source: <a href="https://github.com/Neymik/claude-code-remote-clipboard">github.com/Neymik/claude-code-remote-clipboard</a></p>
   </footer>
 
